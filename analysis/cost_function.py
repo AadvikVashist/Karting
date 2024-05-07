@@ -14,7 +14,7 @@ def add_line(img, arr, color=  (0,255,0), thick = 3):
 
 
 #chatgpt added comments to this
-def optimized_cost_function(kart, path_points, track_graph, curr_track_img=None, show=False, use_kart_width=False):
+def optimized_cost_function_1(kart, path_points, track_graph, curr_track_img=None, show=False, use_kart_width=False):
     total_cost = 0  # Initialize the total cost of the path
     velocity = 0  # Starting velocity of the kart
     collision_point = False  # Flag to indicate if there was a collision
@@ -92,3 +92,80 @@ def optimized_cost_function(kart, path_points, track_graph, curr_track_img=None,
         cv2.destroyAllWindows()  # Close the window
 
     return total_cost  # Return the total cost
+
+
+def optimized_cost_function(kart, path_points, track_graph, curr_track_img=None, show=False, use_kart_width=False):
+    total_cost = 0
+    velocity = 0
+    collision_point = False
+
+    max_speed = kart.max_speed
+    acceleration = kart.acceleration
+    braking = kart.braking
+    max_speed_penalty = 10 * max(0, max_speed - kart.max_speed)
+    kart_half_width = kart.width / 2
+
+    if curr_track_img is not None:
+        curr_track_img = curr_track_img.copy()
+
+    path_points = np.array(path_points)
+    distances = np.linalg.norm(np.diff(path_points, axis=0), axis=1)
+
+    for i in range(1, len(path_points)):
+        distance = distances[i - 1]
+
+        if i > 1:
+            prev_vector = path_points[i - 2] - path_points[i - 1]
+            curr_vector = path_points[i - 1] - path_points[i]
+            angle_diff = np.abs(np.arctan2(np.cross(prev_vector, curr_vector), np.dot(prev_vector, curr_vector)))
+
+            # Apply an exponential penalty to sharp turns to further optimize straights
+            turn_penalty = (angle_diff ** 2) * 100
+            max_velocity_turn = max_speed * np.clip(1 - angle_diff / np.pi, 0.2, 1)
+        else:
+            angle_diff = 0
+            turn_penalty = 0
+            max_velocity_turn = max_speed
+            curr_vector = path_points[i - 1] - path_points[i]
+
+        velocity = np.clip(velocity + acceleration * distance / acceleration * (velocity < max_velocity_turn) -
+                           braking * distance / braking * (velocity > max_velocity_turn), 0, max_velocity_turn)
+
+        speed_penalty = max_speed_penalty * np.maximum(0, velocity - max_speed)
+
+        segment_cost = distance + speed_penalty + turn_penalty
+
+        if use_kart_width:
+            kart_direction = curr_vector / np.linalg.norm(curr_vector)
+            kart_perpendicular = np.array([-kart_direction[1], kart_direction[0]])
+            kart_left = path_points[i] + kart_half_width * kart_perpendicular
+            kart_right = path_points[i] - kart_half_width * kart_perpendicular
+
+            for point in [path_points[i], kart_left, kart_right]:
+                grid_y, grid_x = point[1] // 2, point[0] // 2
+
+                if not track_graph.has_node((grid_y, grid_x)):
+                    collision_point = True
+                    if curr_track_img is not None:
+                        cv2.circle(curr_track_img, (int(point[0]), int(point[1])), 10, (255, 0, 0), -1)
+                    segment_cost += 100 * 1000
+                    break
+        else:
+            grid_y, grid_x = path_points[i, 1] // 2, path_points[i, 0] // 2
+
+            if not track_graph.has_node((grid_y, grid_x)):
+                collision_point = True
+                if curr_track_img is not None:
+                    cv2.circle(curr_track_img, (int(path_points[i, 0]), int(path_points[i, 1])), 10, (255, 0, 0), -1)
+
+                segment_cost += 100 * 1000
+
+        total_cost += segment_cost
+
+    if (curr_track_img is not None and collision_point) or show:
+        curr_track_img = add_line(curr_track_img, path_points)
+        cv2.imshow('Track with collision points', curr_track_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    return total_cost
