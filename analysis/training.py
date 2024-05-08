@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 import pickle as pkl
-from cost_function import optimized_cost_function, add_line
+from cost_function import optimized_cost_function, add_line, check_collision
 import os
 from scipy.ndimage import gaussian_filter
 import matplotlib.pyplot as plt
@@ -10,6 +10,7 @@ from scipy.interpolate import interp1d
 from collections import OrderedDict
 import utils
 from kart import Kart
+import networkx as nx
 
 # Define a cache for the optimized_cost_function results
 cost_function_cache = OrderedDict()
@@ -17,7 +18,7 @@ CACHE_SIZE_LIMIT = 1000
 
 min_dist = 0
 
-def memoized_optimized_cost_function(kart, path, track_graph, min_dist):
+def memoized_optimized_cost_function(kart, path, track_graph, min_dist, curr_track_img = None, show = False):
     # Use tuple of parameters as key to check the cache
     cache_key = (tuple(map(tuple, path)), tuple(track_graph))
     
@@ -25,8 +26,8 @@ def memoized_optimized_cost_function(kart, path, track_graph, min_dist):
         return cost_function_cache.pop(cache_key)
     
     # Compute the result if not in cache
-    cost = optimized_cost_function(kart, path, track_graph, use_kart_width=USE_WIDTH, min_distance=min_dist)
-    cost_function_cache[cache_key] = cost
+    cost,collision_points = optimized_cost_function(kart, path, track_graph, min_distance=min_dist, curr_track_img=curr_track_img, show=show)
+    cost_function_cache[cache_key] = [cost,collision_points]
     
     # Move the recently used item to the end of the cache
     cost_function_cache.move_to_end(cache_key)
@@ -35,7 +36,7 @@ def memoized_optimized_cost_function(kart, path, track_graph, min_dist):
     if len(cost_function_cache) > CACHE_SIZE_LIMIT:
         cost_function_cache.popitem(last=False)
     
-    return cost
+    return cost, collision_points
 
 
 def resample_centerline(centerline, track_width, num_points):
@@ -92,7 +93,7 @@ def update_point(point, point_b4, point_aft, weight=0.3, clockwise=True):
     # plt.show()
     return new_point
 
-def create_random_path(track_line, track_width, weight = 0.3):
+def create_random_path(track_line, track_width, centerline, track_graph, weight = 0.3):
     # Create a random path within the track boundaries
     random_paths = []
     #add 0 index to end of centerline array
@@ -103,6 +104,14 @@ def create_random_path(track_line, track_width, weight = 0.3):
             # get the point before, and after the current point in the centerline to get the direction
             # get the vector between the two points
             random_path_point = update_point(track_line[i], track_line[i - 1], track_line[i + 1], random_offset)
+            if check_collision(random_path_point, kart, track_graph) > 0:
+                # Find the nearest centerline point within 2 * track_width
+                near_centerline_points = centerline[np.linalg.norm(centerline - random_path_point, axis=1) < 2 * track_width]
+                if len(near_centerline_points) > 0:
+                    closest_point = near_centerline_points[np.argmin(np.linalg.norm(near_centerline_points - random_path_point, axis=1))]
+                while check_collision(random_path_point, kart, track_graph) > 0:
+                    random_path_point = (random_path_point * 2 + closest_point) / 3
+                    
             random_paths.append(random_path_point)
             # plt.plot(random_path_point[0], random_path_point[1], 'ro', label='Random Path')
             # plt.plot(centerline[i][0], centerline[i][1], 'bo', label='Centerline')
@@ -145,29 +154,8 @@ def compute_sigma(mutation_rate, temperature, sigma_min=0, sigma_max=1):
     #     sigma = sigma_max
     return sigma
 
-def mutate_old(centerline, path, mutation_rate, track_width, temperature):
-    # Apply mutation to a path
-    scalar = temperature ** 2
-    sigma = np.round(compute_sigma(mutation_rate, temperature, sigma_max=SIGMA_MAX))
-    i = 0
-    while i < len(path):
-        if i <= CONNECTION_BUFFER or i >= len(path) - CONNECTION_BUFFER:
-            i+=1
-            continue
-        if np.random.rand() < mutation_rate:
-            random_ret = np.random.uniform(-1*scalar/5, scalar/5)
-            quant = int(np.round(np.random.uniform(low = MUTATION_SHIFT_MIN, high = MUTATION_SIZE_MAX)))
-            if i + quant + 1 > len(path):
-                quant = len(path) - i-2
-            shift = [update_point(path[iter_var], centerline[iter_var-1], path[iter_var+1], random_ret*track_width[iter_var]) for iter_var in range(i, i+quant)]
-            path[i:i+quant] = shift
-            i+=quant
-        i+=1
-    path = smooth_centerline(path, sigma)
-    return path
-
-def mutate_gauss(centerline, path, mutation_rate, track_width, temperature, graph):
-    scalar = temperature * MUTATION_MAG
+def mutate(centerline, path, mutation_rate, track_width, temperature, kart, track_graph):
+    scalar = temperature ** (1/3) * MUTATION_MAG
     sigma = np.round(compute_sigma(mutation_rate, temperature, sigma_max=SIGMA_MAX))
     i = 0
     
@@ -178,121 +166,79 @@ def mutate_gauss(centerline, path, mutation_rate, track_width, temperature, grap
     width_appended = np.hstack((track_width[-CONNECTION_BUFFER::], track_width, track_width[0:CONNECTION_BUFFER]))
     track_width = np.array(track_width)
 
-    # Calculate inner and outer bounds of the track
-    inner_bound = centerline_appended - width_appended[:, None] / 2
-    outer_bound = centerline_appended + width_appended[:, None] / 2
-
+    
     while i < len(path_appended) - 1:
+        
         if np.random.rand() < mutation_rate:
             random_ret = np.random.uniform(-scalar, scalar)
             quant = int(np.round(np.random.uniform(low=MUTATION_SHIFT_MIN, high=MUTATION_SIZE_MAX)))
 
             if i + quant >= len(path_appended):
                 quant = len(path_appended) - i - 1
-
             if quant >= 3:
                 x = np.linspace(-1, 1, quant)
-                gaussian_weights = np.exp(-0.5 * (x ** 2) / (0.45 ** 2)) * random_ret
-                plt.plot(x, gaussian_weights)
-                plt.show()
+                gaussian_weights = np.exp(-0.5 * (x ** 2) / (0.3 ** 2)) * random_ret
             else:
                 gaussian_weights = [random_ret] * quant
 
             shift = []
+            collision = False
             for iter_var in range(i, i + quant):
                 new_pos = update_point(path_appended[iter_var], centerline_appended[iter_var - 1],
                                        centerline_appended[iter_var + 1], gaussian_weights[iter_var - i] * width_appended[iter_var],
                                        clockwise=False)
-                # Ensure the new position is within bounds
-                if not (np.all(new_pos >= inner_bound[iter_var]) and np.all(new_pos <= outer_bound[iter_var])):
-                    # Project the point onto the nearest boundary
-                    new_pos = project_to_boundary(new_pos, inner_bound[iter_var], outer_bound[iter_var])
-                shift.append(new_pos)
-
-            path_appended[i:i + quant] = shift
-            i += quant
-        i += 1
-
-    path_appended = smooth_centerline(path_appended, sigma)
-    
-    #take the average between the appended 5 points and the original points
-    connect_ends = np.mean([path_appended[0:CONNECTION_BUFFER*2], path_appended[len(path)::]],axis=0)
-    ret_path = np.vstack((connect_ends[-CONNECTION_BUFFER:], path_appended[2*CONNECTION_BUFFER:-CONNECTION_BUFFER*2], connect_ends[0:CONNECTION_BUFFER] ))
-
-    return ret_path
-
-def mutate(centerline, path, mutation_rate, track_width, temperature, inner_bound, outer_bound):
-    scalar = temperature * MUTATION_MAG
-    sigma = np.round(compute_sigma(mutation_rate, temperature, sigma_max=SIGMA_MAX))
-    i = 0
-    
-    path = np.array(path) 
-    path_appended = np.vstack((path[-CONNECTION_BUFFER::], path, path[0:CONNECTION_BUFFER])) #append the first x points to the end of the array
-    #do the same for the track_width and centerline
-    centerline_appended = np.vstack((centerline[-CONNECTION_BUFFER::], centerline, centerline[0:CONNECTION_BUFFER]))
-    width_appended = np.hstack((track_width[-CONNECTION_BUFFER::], track_width, track_width[0:CONNECTION_BUFFER]))
-    track_width = np.array(track_width)
-
-    
-    while i < len(path_appended) - 1:
-        if np.random.rand() < mutation_rate:
-            random_ret = np.random.uniform(-scalar, scalar)
-            quant = int(np.round(np.random.uniform(low=MUTATION_SHIFT_MIN, high=MUTATION_SIZE_MAX)))
-
-            if i + quant >= len(path_appended):
-                quant = len(path_appended) - i - 1
-
-            shift = []
-            for iter_var in range(i, i + quant):
-                new_pos = update_point(path_appended[iter_var], centerline_appended[iter_var - 1],
-                                       centerline_appended[iter_var + 1], random_ret * width_appended[iter_var],
-                                       clockwise=False)
+                # Check for collision and handle if any
+                
+                # if check_collision(new_pos, kart, track_graph) > 0:
+                #     collision = True
+                #     # Find the nearest centerline point within 2 * track_width
+                #     near_centerline_points = centerline[np.linalg.norm(centerline - new_pos, axis=1) < 2 * track_width]
+                #     if len(near_centerline_points) > 0:
+                #         closest_point = near_centerline_points[np.argmin(np.linalg.norm(near_centerline_points - new_pos, axis=1))]
+                #     while check_collision(new_pos, kart, track_graph) > 0:
+                #         new_pos = (new_pos * 2 + closest_point) / 3
+                        
+                path_appended[i] = new_pos
                 # Ensure the new position is within bounds
                 
-                # if not (np.all(new_pos >= inner_bound[iter_var]) and np.all(new_pos <= outer_bound[iter_var])):
-                #     # Project the point onto the nearest boundary
-                #     new_pos = project_to_boundary(new_pos, inner_bound[iter_var], outer_bound[iter_var])
                 shift.append(new_pos)
 
             path_appended[i:i + quant] = shift
-            path_appended[i-10:i+quant+10] = smooth_centerline(path_appended[i-10:i+quant+10], 1)
+            if not collision:
+                path_appended[i-5:i+quant+5] = smooth_centerline(path_appended[i-5:i+quant+5], 1)
+            
             i += quant
         i += 1
 
-    path_appended = smooth_centerline(path_appended, sigma)
-    
+    # path_appended = smooth_centerline(path_appended, sigma)
     #take the average between the appended 5 points and the original points
     connect_ends = np.mean([path_appended[0:CONNECTION_BUFFER*2], path_appended[len(path)::]],axis=0)
     ret_path = np.vstack((connect_ends[-CONNECTION_BUFFER:], path_appended[2*CONNECTION_BUFFER:-CONNECTION_BUFFER*2], connect_ends[0:CONNECTION_BUFFER] ))
+    
+    
+    #collision check
+    check = [check_collision(point, kart, track_graph) for point in ret_path]
+    if any(check) > 0:
+        #get the indices of the issues
+        indices = [i for i, x in enumerate(check) if x > 0]
+        #get the points that are causing the issues
+        for index in indices:
+            new_pos = ret_path[index]
+            # Find the nearest centerline point within 2 * track_width
+            near_centerline_points = centerline[np.linalg.norm(centerline - new_pos, axis=1) < 2 * track_width]
+            if len(near_centerline_points) > 0:
+                closest_point = near_centerline_points[np.argmin(np.linalg.norm(near_centerline_points - new_pos, axis=1))]
+            while check_collision(new_pos, kart, track_graph) > 0:
+                new_pos = (new_pos * 7 + closest_point) / 8
+            ret_path[index] = new_pos
 
     return ret_path
 
-def project_to_boundary(point, inner_bound, outer_bound, buffer_ratio=0.1):
-    # Calculate buffer distances based on track width
-    track_width = np.linalg.norm(outer_bound - inner_bound)
-    buffer_distance = track_width * buffer_ratio
 
-    # Determine the closest boundary and adjust with buffer
-    if np.linalg.norm(point - inner_bound) < np.linalg.norm(point - outer_bound):
-        projected_point = inner_bound + (point - inner_bound) / np.linalg.norm(point - inner_bound) * buffer_distance
-    else:
-        projected_point = outer_bound - (outer_bound - point) / np.linalg.norm(outer_bound - point) * buffer_distance
-
-    # Ensure the projected point does not cross the boundary
-    projected_point = np.clip(projected_point, inner_bound, outer_bound)
-    # plt.plot(projected_point[0], projected_point[1], 'ro', label='Random Path')
-    # plt.plot(point[0], point[1], 'bo', label='Centerline')
-    # plt.plot(inner_bound[0], inner_bound[1], 'go', label='inner_bound')
-    # plt.plot(outer_bound[0], outer_bound[1], 'o', label='after Path')
-    # plt.legend()
-    # plt.show()
-    return projected_point
-
-
-def evaluate_fitness(paths, kart, track_graph, min_dist):
+def evaluate_fitness(paths, kart, track_graph, min_dist, curr_track_img):
     fitness = []
     for path in paths:
-        cost = memoized_optimized_cost_function(kart, path, track_graph, min_dist)
+        cost, _ = memoized_optimized_cost_function(kart, path, track_graph, min_dist, curr_track_img=curr_track_img, show = SHOW)
         fitness.append(1 / cost)  # Inverse of cost as fitness
     return np.array(fitness)
 
@@ -306,12 +252,12 @@ def select_parents(paths, fitness):
 def genetic_algorithm(kart, centerline, track_line, track_width, track_graph, track_img, contour, min_dist = 0):
     # Initialize parameters
     # Assuming each point is represented as (x, y) and track_graph has nodes that represent valid positions
-    population = [smooth_centerline(create_random_path(track_line, track_width, weight=INITIAL_TEMPERATURE), sigma=5) for _ in range(POPULATION_SIZE)]
+    population = [smooth_centerline(create_random_path(track_line, track_width, centerline=centerline, track_graph = track_graph, weight=INITIAL_TEMPERATURE), sigma=5) for _ in range(POPULATION_SIZE)]
     temperature = INITIAL_TEMPERATURE  # Initial temperature
     cooling_rate = (MIN_TEMP/temperature)**(1/NUM_GENERATIONS)
 
     # Evaluate initial fitness
-    fitness = evaluate_fitness(population, kart, track_graph, min_dist)
+    fitness = evaluate_fitness(population, kart, track_graph, min_dist, curr_track_img=track_img)
     best_index = np.argmin(fitness)
     best_path = population[best_index]
     best_cost = 1 / fitness[best_index]
@@ -323,8 +269,11 @@ def genetic_algorithm(kart, centerline, track_line, track_width, track_graph, tr
         new_population = []
         x+=1
         start = time.time()
-        lin = np.linspace(-1, 0, len(population))
-        gaussian_weights = np.exp(-0.5 * (lin ** 2) / (0.2 ** 2))*(MUTATION_MAX-MUTATION_RATE) + MUTATION_RATE  # Adjust the 0.25 std dev as needed
+        if MUTATION_MAX == MUTATION_RATE:
+            gaussian_weights = [MUTATION_RATE] * len(population)
+        else:
+            lin = np.linspace(-1, 0, len(population))
+            gaussian_weights = np.exp(-0.5 * (lin ** 2) / (0.2 ** 2))*(MUTATION_MAX-MUTATION_RATE) + MUTATION_RATE  # Adjust the 0.25 std dev as needed
         # plt.plot(x, gaussian_weights)
         # plt.show()
         for parent_index, _ in enumerate(population):
@@ -335,10 +284,10 @@ def genetic_algorithm(kart, centerline, track_line, track_width, track_graph, tr
             child1, child2 = crossover(parent1, parent2)
 
             # Mutate children
-            child1 = mutate(centerline, child1, gaussian_weights[parent_index], track_width, temperature, inner_bound=contour[0], outer_bound=contour[1])
-            child2 = mutate(centerline, child2, gaussian_weights[parent_index], track_width, temperature, inner_bound=contour[0], outer_bound=contour[1])
+            child1 = mutate(centerline, child1, gaussian_weights[parent_index], track_width, temperature, kart, track_graph)
+            child2 = mutate(centerline, child2, gaussian_weights[parent_index], track_width, temperature, kart, track_graph)
             # Evaluate fitness of children
-            child1_fitness = 1 / memoized_optimized_cost_function(kart, child1, track_graph, min_dist) #fast
+            child1_fitness = 1 / memoized_optimized_cost_function(kart, child1, track_graph, min_dist)[0] #fast
             # child2_fitness = 1 / memoized_optimized_cost_function(kart, child2, track_graph) #fast
 
             # Select one child based on fitness and temperature
@@ -352,7 +301,7 @@ def genetic_algorithm(kart, centerline, track_line, track_width, track_graph, tr
         temperature *= cooling_rate
 
         # Find and display the best path
-        fitness = evaluate_fitness(population, kart, track_graph, min_dist)
+        fitness = evaluate_fitness(population, kart, track_graph, min_dist, curr_track_img=track_img)
         best_index = np.argmin(fitness)
         best_path = population[best_index]
         best_cost = 1 / fitness[best_index]
@@ -363,7 +312,7 @@ def genetic_algorithm(kart, centerline, track_line, track_width, track_graph, tr
         best_path_show = best_path
         track_with_path = add_line(track_img.copy(), best_path_show)
         cv2.line(track_with_path, (int(best_path_show[0][0]), int(best_path_show[0][1])), (int(best_path_show[-1][0]), int(best_path_show[-1][1])), (0, 0, 255), 3)
-        cv2.putText(track_with_path, f"Cost: {best_cost:,.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 50, 0), 2)
+        cv2.putText(track_with_path, f"Cost: {best_cost:,.2f} at Temperature = {np.around(temperature,3)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 50, 0), 2)
         if SHOW:
             cv2.imshow("Best Path", track_with_path)
             cv2.waitKey(1)
@@ -375,9 +324,6 @@ def genetic_algorithm(kart, centerline, track_line, track_width, track_graph, tr
     print(f"Final Best Cost = {best_cost:,.2f} at Temperature = {np.around(temperature,3)}")
     return best_path
 
-# Example usage
-
-import utils as utils
 
 def save_best_path(dir,file_name, best_path):
     # get the number of files in the dir that contain that name
@@ -386,7 +332,7 @@ def save_best_path(dir,file_name, best_path):
     num_files = len([f for f in os.listdir(dir) if os.path.isfile(os.path.join(dir, f)) and file in f])
     file_name = file + str(num_files) + "." + file_name.split('.')[1]
     pkl.dump(best_path, open(os.path.join(dir, file_name), 'wb'))
-    
+
 def train(kart, track_line):
     if os.path.exists(utils.get_base_file_path('images/gens')):
         #move the files to a new folder called images/old_gens/{time}
@@ -406,8 +352,10 @@ def train(kart, track_line):
     track_graph = pkl.load(open(utils.get_base_file_path('saves/graph.pkl'), 'rb'))
     track_img = cv2.imread(utils.get_base_file_path('images/track_edited.jpg'))
     # Create Kart instance
-    
-
+    # x = track_graph
+    # if USE_WIDTH:
+    #     track_graph = convert_graph(track_graph, kart.width)
+    # visualize_track_graph(x, track_graph, 2)
     contour  = [contours[1].squeeze(), contours[0].squeeze()]   
 
     new_centerline, new_track_width = resample_centerline(centerline, track_width, POINTS)
@@ -435,13 +383,13 @@ def run_prev(kart):
 
 # Define genetic algorithm parameters
 POPULATION_SIZE = 50
-MUTATION_RATE = 0.04
-MUTATION_MAX = 0.1
+MUTATION_RATE = 0.01
+MUTATION_MAX = 0.01
 
 CONNECTION_BUFFER = 25
 
-INITIAL_TEMPERATURE = 1.0
-MIN_TEMP = 0.1
+INITIAL_TEMPERATURE = 0.9
+MIN_TEMP = 0.2
 
 NUM_GENERATIONS = 400
 
@@ -449,14 +397,14 @@ POINTS = 1000
 
 MUTATION_MAG = 1/10
 
-MUTATION_SHIFT_MIN = 10
-MUTATION_SIZE_MAX = 40
+MUTATION_SHIFT_MIN = 5
+MUTATION_SIZE_MAX = 100
 
 SIGMA_MAX = 2
 SIGMA_RANDOM = 0.7
 
 SHOW = True
-USE_WIDTH = False
+# USE_WIDTH = True
 
 kart = Kart(
     max_speed=130,           # 13 m/s
