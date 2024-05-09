@@ -9,6 +9,33 @@ from utils import line_length
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
+from collections import OrderedDict
+from path_manipulation import check_collision
+cost_function_cache = OrderedDict()
+CACHE_SIZE_LIMIT = 1000
+
+def ndarray_to_tuple(array):
+    return tuple(map(tuple, array))
+
+def memoized_optimized_cost_function(kart, path, track_graph):
+    # Convert the path and track_graph to tuple of tuples for caching
+    cache_key = (ndarray_to_tuple(path), ndarray_to_tuple(track_graph))
+    
+    if cache_key in cost_function_cache:
+        return cost_function_cache.pop(cache_key)
+    
+    # Compute the result if not in cache
+    cost, collision_points = optimized_cost_function(kart, path, track_graph)
+    cost_function_cache[cache_key] = [cost, collision_points]
+    
+    # Move the recently used item to the end of the cache
+    cost_function_cache.move_to_end(cache_key)
+
+    # Clear cache entries if the size exceeds the limit
+    if len(cost_function_cache) > CACHE_SIZE_LIMIT:
+        cost_function_cache.popitem(last=False)
+    
+    return cost, collision_points
 
 def plot_path_with_costs(track_graph, path_points, point_costs, collision_points):
     fig, ax = plt.subplots()
@@ -39,7 +66,7 @@ def add_line(img, arr, color=  (0,255,0), thick = 3):
     return curr
 
 
-def optimized_cost_function(kart, path_points, track_graph, curr_track_img=None, show=False, min_distance=0):
+def optimized_cost_function(kart, path_points, track_graph):
     total_cost = 0
     velocity = kart.max_speed  # Initial velocity
     collision_points = []
@@ -77,7 +104,15 @@ def optimized_cost_function(kart, path_points, track_graph, curr_track_img=None,
         segment_cost = distance + speed_penalty + turn_penalty + acceleration_penalty + extra_sharp_turn_penalty
         
         # Collision detection and adding collision cost
-        collision_cost = check_collision(path_points[i], kart, track_graph, curr_track_img)
+        try:
+            collision = check_collision(path_points[i], track_graph)
+            if collision:
+                collision_cost = 100*1000
+            else:
+                collision_cost = 0
+        except Exception as e:
+            print(e)
+            collision_cost = 0
         if collision_cost > 0:
             collision_points.append(path_points[i])
         point_cost.append(segment_cost )
@@ -85,21 +120,12 @@ def optimized_cost_function(kart, path_points, track_graph, curr_track_img=None,
         total_cost += segment_cost
     
     # Optional visualization of track and collisions
-    if show and curr_track_img is not None and collision_points:
-        # display_track(curr_track_img, path_points, collision_points)
-        plot_path_with_costs(curr_track_img, path_points, point_cost, collision_points)
+    
+    # if show and curr_track_img is not None and collision_points:
+    #     # display_track(curr_track_img, path_points, collision_points)
+    #     plot_path_with_costs(curr_track_img, path_points, point_cost, collision_points)
     return total_cost, collision_points
 
-def check_collision(point, kart, track_graph, curr_track_img = None):
-    collision_cost = 0
-
-    grid_y, grid_x = int(point[1] // 2), int(point[0] // 2)
-    if not track_graph.has_node((grid_y, grid_x)):
-        collision_cost += 1000*1000
-        if curr_track_img is not None:
-            cv2.circle(curr_track_img, (int(point[0]), int(point[1])), 10, (255, 0, 0), -1)
-
-    return collision_cost
 
 def display_track(img, path_points):
     img = add_line(img, path_points)  # Assumes implementation of add_line function

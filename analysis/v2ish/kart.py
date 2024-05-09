@@ -1,4 +1,5 @@
 import numpy as np
+from path_manipulation import calculate_curvature
 class Kart:
     def __init__(self, max_speed, acceleration, braking, turning_radius, steerability, width=1.0, length=1.0):
         self.max_speed = max_speed
@@ -11,9 +12,7 @@ class Kart:
 
     def get_max_speed(self, curvature):
         # Calculate the maximum speed based on the curvature of the racing line
-        # Example formula: based on centripetal acceleration
-        max_speed = min(self.max_speed, np.sqrt(self.turning_radius * self.max_angular_acceleration))
-        return max_speed
+        return min(self.max_speed, np.sqrt(self.turning_radius / curvature))
 
     def get_max_acceleration(self, speed):
         # Returns the acceleration based on current speed
@@ -23,3 +22,5 @@ class Kart:
         # Estimate the stopping distance based on speed and braking capacity
         stopping_distance = speed ** 2 / (2 * self.braking)
         return stopping_distance
+    def get_curvature(self, points):
+        return calculate_curvature(points)

@@ -7,19 +7,46 @@ from heapq import heappop, heappush
 from scipy.spatial import cKDTree
 #import pchip interpolator
 from scipy.interpolate import PchipInterpolator
-from .utils import get_base_file_path
+import matplotlib.pyplot as plt
+from utils import get_base_file_path
 def load_image(image_path):
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    contours = pkl.load(open('../saves/track_contours.pkl', 'rb'))
+    contours = pkl.load(open(get_base_file_path('saves/track_contours.pkl'), 'rb'))
     return img, contours
 
 
 
+# def extract_track_boundaries(image, contours):
+#     inner_contour = contours[1]
+#     outer_contour = contours[0]
+#     height, width = image.shape
+#     grid_size = 1
+
+#     grid_height = height // grid_size
+#     grid_width = width // grid_size
+#     grid = np.zeros((grid_height, grid_width), dtype=bool)
+
+#     for y in range(grid_height):
+#         for x in range(grid_width):
+#             cell_center = (x * grid_size + grid_size // 2, y * grid_size + grid_size // 2)
+#             if cv2.pointPolygonTest(outer_contour, cell_center, False) >= 0 and cv2.pointPolygonTest(inner_contour, cell_center, False) < 0:
+#                 grid[y, x] = True
+
+#     graph = nx.grid_2d_graph(grid_height, grid_width)
+
+#     for y in range(grid_height):
+#         for x in range(grid_width):
+#             if not grid[y, x]:
+#                 graph.remove_node((y, x))
+#     plt.imshow(grid)
+#     plt.show()
+#     return graph, grid_size
+
 def extract_track_boundaries(image, contours):
     inner_contour = contours[1]
     outer_contour = contours[0]
-    height, width = image.shape
-    grid_size = 2
+    height, width = image.shape[:2]
+    grid_size = 1
 
     grid_height = height // grid_size
     grid_width = width // grid_size
@@ -31,19 +58,9 @@ def extract_track_boundaries(image, contours):
             if cv2.pointPolygonTest(outer_contour, cell_center, False) >= 0 and cv2.pointPolygonTest(inner_contour, cell_center, False) < 0:
                 grid[y, x] = True
 
-    graph = nx.grid_2d_graph(grid_height, grid_width)
-
-    for y in range(grid_height):
-        for x in range(grid_width):
-            if not grid[y, x]:
-                graph.remove_node((y, x))
-
-    return graph, grid_size
+    return grid
 
 
-
-
-import matplotlib.pyplot as plt
 def find_centerline(img, inside_contour, outside_contour):
     centerline = []
     inside_contour = inside_contour.squeeze(axis=1)
@@ -81,12 +98,11 @@ def find_centerline(img, inside_contour, outside_contour):
             weightage = 15
             y_dir= point[1]/weightage + curr_point[1]*(weightage-1)/weightage
             x_dir= point[0]/weightage + curr_point[0]*(weightage-1)/weightage
-            grid_y = y_dir // grid_size
-            grid_x = x_dir // grid_size
-
+            grid_y = int(y_dir //1)
+            grid_x = int(x_dir // 1)
             
             # Check if the point belongs to the graph
-            if graph.has_node((grid_y, grid_x)):
+            if graph[grid_y, grid_x]:
                 filtered_outside.append(point)
                 cv2.circle(curr_im, point , 3, (0, 255, 0), -1)
             else:
@@ -119,8 +135,8 @@ def find_orthogonal_projection(point, outside_contour):
 
 if __name__ == '__main__':
     # Load the image and contours
-    img, top_contours = load_image('./output_img.jpg')
-    graph, grid_size = extract_track_boundaries(img, top_contours)
+    img, top_contours = load_image(get_base_file_path('images/output.jpg'))
+    graph = extract_track_boundaries(img, top_contours)
     centerline, track_width = find_centerline(img, top_contours[1], top_contours[0])
 
     # show the centerline
@@ -129,8 +145,9 @@ if __name__ == '__main__':
     #     cv2.circle(output_img, (int(point[0]), int(point[1])), 1, (0, 255, 0), -1)
     #show the centerline as a line
     pkl.dump(centerline, open(get_base_file_path('saves/centerline.pkl'), 'wb'))
-    pkl.dump(track_width, open(get_base_file_path('../saves/track_width.pkl'), 'wb'))
-    pkl.dump(graph, open(get_base_file_path('../saves/graph.pkl', 'wb')))
+    pkl.dump(track_width, 
+             open(get_base_file_path('saves/track_width.pkl'), 'wb'))
+    pkl.dump(graph, open(get_base_file_path('saves/graph.pkl'), 'wb'))
     for i in range(len(centerline)-1):
         cv2.line(output_img, (int(centerline[i][0]), int(centerline[i][1])), (int(centerline[i+1][0]), int(centerline[i+1][1])), (0, 255, 0), 1)
     cv2.imshow('Centerline', output_img)
