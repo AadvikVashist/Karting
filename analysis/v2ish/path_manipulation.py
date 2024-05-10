@@ -60,7 +60,6 @@ def mutate_path(path, track_boundaries, mutation_rate, mutation_strength, smooth
         # Smooth the path to ensure transitions are not too abrupt
         path[start-smoothing_radius:end+1+smoothing_radius] = smooth_path(path[start-smoothing_radius:end+1+smoothing_radius], smoothing_radius)
     
-    return path
 
 def create_random_path(track_line, track_width, centerline, track_graph, weight=0.3):
     random_paths = []

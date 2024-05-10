@@ -11,8 +11,15 @@ class Kart:
         self.max_angular_acceleration = steerability
 
     def get_max_speed(self, curvature):
-        # Calculate the maximum speed based on the curvature of the racing line
-        return min(self.max_speed, np.sqrt(self.turning_radius / curvature))
+        # Constants based on kart capabilities and track conditions
+
+        # Speed based on lateral acceleration limit (v^2/r = a)
+        if curvature != 0:
+            max_speed = (self.max_angular_acceleration / curvature) ** 0.5
+        else:
+            max_speed = self.max_speed
+        
+        return min(max_speed, self.max_speed)
 
     def get_max_acceleration(self, speed):
         # Returns the acceleration based on current speed

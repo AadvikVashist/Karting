@@ -72,9 +72,57 @@ def calculate_cost(path, kart, track_graph, visualization=False):
     speed_penalty = 0
     
     # Constants for penalties
+    COLLISION_COST = 100*1000
+def calculate_cost(path, kart, track_graph, visualization=False):
+    total_time = 0
+    collision_penalty = 0
+    smoothness_penalty = 0
+    speed_penalty = 0
+    
+    # Constants for penalties
     COLLISION_COST = 1000
-    TURN_COST_MULTIPLIER = 5
-    SPEED_COST_MULTIPLIER = 2
+    TURN_COST_MULTIPLIER = 1  # Lower impact than speed
+    SPEED_REWARD_MULTIPLIER = 0.5  # Reward for maintaining high speed
+    SPEED_COST_MULTIPLIER = 1  # Penalty for speed inconsistency
+    # Iterate through the path
+    for i in range(1, len(path)):
+        current_point = path[i]
+        previous_point = path[i-1]
+
+        # Time calculation
+        distance = np.linalg.norm(current_point - previous_point)
+        speed = min(kart.max_speed, kart.get_max_speed(kart.get_curvature(path[i-5:i+5])))
+        time_increment = distance / speed
+        total_time += time_increment
+
+        # Collision check
+        if not check_collision(current_point, track_graph):
+            collision_penalty += COLLISION_COST
+
+        # Smoothness calculation
+        if i > 1:
+            prev_vector = previous_point - path[i-2]
+            curr_vector = current_point - previous_point
+            angle_diff = np.arccos(np.clip(np.dot(prev_vector, curr_vector) / 
+                            (np.linalg.norm(prev_vector) * np.linalg.norm(curr_vector)), -1.0, 1.0))
+            smoothness_penalty += TURN_COST_MULTIPLIER * angle_diff
+
+        # Speed consistency
+        if i > 1:
+            previous_speed = np.linalg.norm(previous_point - path[i-2]) / time_increment
+            speed_diff = abs(speed - previous_speed)
+            speed_penalty += SPEED_COST_MULTIPLIER * speed_diff
+
+    # Total cost calculation
+    total_cost = total_time - SPEED_REWARD_MULTIPLIER * speed + collision_penalty + smoothness_penalty + speed_penalty
+
+    # Visualization of the cost factors
+    if visualization:
+        visualize_cost_factors(path, total_time, collision_penalty, smoothness_penalty, speed_penalty)
+
+    return total_cost
+
+
 
     # Iterate through the path
     for i in range(1, len(path)):
@@ -113,6 +161,7 @@ def calculate_cost(path, kart, track_graph, visualization=False):
         visualize_cost_factors(path, total_time, collision_penalty, smoothness_penalty, speed_penalty)
 
     return total_cost
+
 
 
 

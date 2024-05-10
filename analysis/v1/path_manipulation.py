@@ -50,7 +50,7 @@ def mutate(centerline, path, mutation_rate, mutation_magnitude, track_width, tra
     # path_appended = smooth_centerline(path_appended, sigma)
     #take the average between the appended 5 points and the original points
     if smoothen:
-        sigma = np.around(np.clip(np.random.uniform(-100, 2), 0,2))
+        sigma = np.around(np.clip(np.random.uniform(-100, 1), 0,1))
         if sigma > 0:
             path_appended = smooth_centerline(path_appended, sigma)
         
